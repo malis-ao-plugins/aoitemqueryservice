@@ -79,13 +79,14 @@ public class AOItemQueryService
 
         Chat.WriteLine("Item database: building from your game files. Item search works once it is ready, in about a minute.", ChatColor.Orange);
 
-        // The build runs off the game thread, so its result goes to chat through the game thread.
+        // The build runs in its own process, so the game never carries it, and its result goes to
+        // chat through the game thread.
         Task.Run(() =>
         {
             try
             {
                 SqliteConnection.ClearAllPools();
-                ItemDbBuilder.Build(gameDirectory, _dbPath, _ => { });
+                RunBuilder(gameDirectory);
                 _dbReady = true;
                 _game?.Say("Item database: ready.", ChatColor.Green);
             }
@@ -94,6 +95,55 @@ public class AOItemQueryService
                 _game?.Say($"Item database: build failed - {ex.Message}", ChatColor.Red);
             }
         });
+    }
+
+    /// <summary>
+    /// Runs ItemDbBuild, which ships in builder\ next to this service, and waits for it. The service
+    /// is loaded from memory and has no path of its own; AOSharp's Bootstrap is loaded from
+    /// Plugins\AOSharp.Bootstrap, so the service's folder is its sibling Plugins\AOItemQueryService.
+    /// </summary>
+    private void RunBuilder(string gameDirectory)
+    {
+        var builder = FindBuilder()
+            ?? throw new FileNotFoundException("ItemDbBuild.exe is missing next to the item service. Compile it again in AOSharp.");
+
+        var start = new ProcessStartInfo(builder)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        start.ArgumentList.Add(gameDirectory);
+        start.ArgumentList.Add(_dbPath);
+
+        using var process = Process.Start(start)!;
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        output.Wait();
+
+        if (process.ExitCode != 0)
+            throw new Exception(string.IsNullOrWhiteSpace(error) ? $"the builder exited with code {process.ExitCode}" : error.Trim());
+    }
+
+    private static string? FindBuilder()
+    {
+        var candidates = new List<string>();
+
+        var own = typeof(AOItemQueryService).Assembly.Location;
+        if (!string.IsNullOrEmpty(own))
+            candidates.Add(Path.Combine(Path.GetDirectoryName(own)!, "builder", "ItemDbBuild.exe"));
+
+        var bootstrap = AppDomain.CurrentDomain.GetAssemblies()
+            .FirstOrDefault(a => a.GetName().Name == "AOSharp.Bootstrap")?.Location;
+        if (!string.IsNullOrEmpty(bootstrap))
+        {
+            var plugins = Path.GetDirectoryName(Path.GetDirectoryName(bootstrap)!)!;
+            candidates.Add(Path.Combine(plugins, "AOItemQueryService", "builder", "ItemDbBuild.exe"));
+        }
+
+        return candidates.FirstOrDefault(File.Exists);
     }
 
     public void Stop()

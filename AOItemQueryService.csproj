@@ -25,5 +25,21 @@
 </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="ItemDb\ItemRelations.csv" LogicalName="ItemRelations.csv" />
+    <!-- The builder is its own program; it is built below, not compiled into the service. -->
+    <Compile Remove="ItemDbBuild\**" />
+    <None Remove="ItemDbBuild\**" />
   </ItemGroup>
+
+  <!--
+    The database is built by ItemDbBuild in its own process. Build it into builder\ next to the
+    service, so the loader ships it with the service's output.
+  -->
+  <Target Name="BuildItemDbBuilder" AfterTargets="Build">
+    <MSBuild Projects="ItemDbBuild\ItemDbBuild.csproj" Targets="Restore"
+             Properties="Configuration=$(Configuration);MSBuildRestoreSessionId=$([System.Guid]::NewGuid())"
+             RemoveProperties="RuntimeIdentifier;PlatformTarget;Platform" />
+    <MSBuild Projects="ItemDbBuild\ItemDbBuild.csproj" Targets="Build"
+             Properties="Configuration=$(Configuration);OutDir=$([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '$(OutDir)', 'builder'))\"
+             RemoveProperties="RuntimeIdentifier;PlatformTarget;Platform" />
+  </Target>
 </Project>
