@@ -1,3 +1,4 @@
+using AOSharp.Common.GameData;
 using AOSharp.Core.UI;
 using Microsoft.Data.Sqlite;
 using Newtonsoft.Json;
@@ -38,7 +39,6 @@ public class AOItemQueryService
                 _listener = new HttpListener();
                 _listener.Prefixes.Add(url);
                 _listener.Start();
-                Chat.WriteLine($"AoDbServer listening on {url}");
                 while (_listener.IsListening)
                 {
                     try
@@ -78,15 +78,15 @@ public class AOItemQueryService
         {
             try
             {
-                Chat.WriteLine("Item database: building from the game files.");
+                Chat.WriteLine("Item database: building from your game files. Item search works once it is ready, in about a minute.", ChatColor.Orange);
                 SqliteConnection.ClearAllPools();
-                ItemDbBuilder.Build(gameDirectory, _dbPath, message => Chat.WriteLine(message));
+                ItemDbBuilder.Build(gameDirectory, _dbPath, _ => { });
                 _dbReady = true;
-                Chat.WriteLine("Item database: ready.");
+                Chat.WriteLine("Item database: ready.", ChatColor.Green);
             }
             catch (Exception ex)
             {
-                Chat.WriteLine($"Item database: build failed - {ex.Message}");
+                Chat.WriteLine($"Item database: build failed - {ex.Message}", ChatColor.Red);
             }
         });
     }
