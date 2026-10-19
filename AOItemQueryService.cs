@@ -25,8 +25,11 @@ public class AOItemQueryService
 
     }
 
+    private GameThread? _game;
+
     public void Start()
     {
+        _game = new GameThread();
         EnsureDatabase();
 
         int port = _server == Server.Retail ? 7070 : 7071;
@@ -47,12 +50,12 @@ public class AOItemQueryService
                         ThreadPool.QueueUserWorkItem(_ => HandleRequest(context));
                     }
                     catch (HttpListenerException) { break; }
-                    catch (Exception ex) { Chat.WriteLine($"[AoDbServer] Accept error: {ex.Message}"); }
+                    catch (Exception ex) { _game?.Say($"[AoDbServer] Accept error: {ex.Message}"); }
                 }
             }
             catch (Exception ex)
             {
-                Chat.WriteLine($"[AoDbServer] Failed to start: {ex}");
+                _game?.Say($"[AoDbServer] Failed to start: {ex.Message}");
             }
         });
 
@@ -74,19 +77,21 @@ public class AOItemQueryService
             return;
         }
 
+        Chat.WriteLine("Item database: building from your game files. Item search works once it is ready, in about a minute.", ChatColor.Orange);
+
+        // The build runs off the game thread, so its result goes to chat through the game thread.
         Task.Run(() =>
         {
             try
             {
-                Chat.WriteLine("Item database: building from your game files. Item search works once it is ready, in about a minute.", ChatColor.Orange);
                 SqliteConnection.ClearAllPools();
                 ItemDbBuilder.Build(gameDirectory, _dbPath, _ => { });
                 _dbReady = true;
-                Chat.WriteLine("Item database: ready.", ChatColor.Green);
+                _game?.Say("Item database: ready.", ChatColor.Green);
             }
             catch (Exception ex)
             {
-                Chat.WriteLine($"Item database: build failed - {ex.Message}", ChatColor.Red);
+                _game?.Say($"Item database: build failed - {ex.Message}", ChatColor.Red);
             }
         });
     }
@@ -95,6 +100,7 @@ public class AOItemQueryService
     {
         _listener?.Stop();
         _listener?.Close();
+        _game?.Dispose();
     }
 
     private void HandleRequest(HttpListenerContext context)
@@ -232,7 +238,7 @@ public class AOItemQueryService
             var inner = ex;
             while (inner != null)
             {
-                Chat.WriteLine($"[AoDbServer] {inner.GetType().Name}: {inner.Message}");
+                _game?.Say($"[AoDbServer] {inner.GetType().Name}: {inner.Message}");
                 inner = inner.InnerException;
             }
             try { res.StatusCode = 500; } catch { }
@@ -647,13 +653,9 @@ public class AOItemQueryService
             new Dictionary<string, object> { ["@id"] = id });
     }
 
-    public unsafe Dictionary<string, object?>? GetIcon(int iconId)
+    public Dictionary<string, object?>? GetIcon(int iconId)
     {
-        var sprite = GuiResourceManager.GetTexture(iconId);
-        if (sprite == null)
-            return null;
-
-        var bytes = sprite->ToPngBytes();
+        var bytes = _game!.Run(() => RenderIcon(iconId));
         if (bytes == null)
             return null;
 
@@ -664,7 +666,7 @@ public class AOItemQueryService
         };
     }
 
-    public unsafe List<Dictionary<string, object?>> GetItemIcons(List<int> idList)
+    public List<Dictionary<string, object?>> GetItemIcons(List<int> idList)
     {
         var placeholders = string.Join(",", idList.Select((_, i) => $"@id{i}"));
         var parameters = idList.Select((v, i) => new { Key = $"@id{i}", Value = (object)v })
@@ -672,20 +674,25 @@ public class AOItemQueryService
 
         var rows = Query($"SELECT item_id, value AS icon FROM item_stat WHERE stat_id = 79 AND item_id IN ({placeholders})", parameters);
 
+        // One trip to the game thread for the whole batch, not one per icon.
+        var iconIds = rows.Select(r => r["icon"]).OfType<long>().Select(id => (int)id).Distinct().ToList();
+        var rendered = _game!.Run(() => iconIds.ToDictionary(id => id, RenderIcon));
+
         foreach (var row in rows)
         {
-            row["iconData"] = null;
-            if (row["icon"] is not long iconId) continue;
-
-            var sprite = GuiResourceManager.GetTexture((int)iconId);
-            if (sprite == null) continue;
-
-            var bytes = sprite->ToPngBytes();
-            if (bytes != null)
-                row["iconData"] = Convert.ToBase64String(bytes);
+            row["iconData"] = row["icon"] is long iconId && rendered.TryGetValue((int)iconId, out var bytes) && bytes != null
+                ? Convert.ToBase64String(bytes)
+                : null;
         }
 
         return rows;
+    }
+
+    /// <summary>Reads an icon from the game's textures as PNG. Game thread only.</summary>
+    private static unsafe byte[]? RenderIcon(int iconId)
+    {
+        var sprite = GuiResourceManager.GetTexture(iconId);
+        return sprite == null ? null : sprite->ToPngBytes();
     }
 
     public List<Dictionary<string, object?>> GetItemNames(List<int> idList)
@@ -706,8 +713,7 @@ public class AOItemQueryService
         }
         catch (Exception ex)
         {
-            Chat.WriteLine($"[DB] {ex}");
-            Chat.WriteLine($"[DB] Inner: {ex.InnerException}");
+            _game?.Say($"[DB] {ex.Message}");
             throw;
         }
 
