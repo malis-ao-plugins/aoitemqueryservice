@@ -9,6 +9,7 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 <ItemGroup>
+    <PackageReference Include="AODB" Version="1.0.12" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
     <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
@@ -16,18 +17,13 @@
 </ItemGroup>
 <ItemGroup>
   <Reference Include="AOSharp.Common">
-    <HintPath>..\AOSharp.Net2\bin\Release\net8.0-windows\Plugins\AOSharp.SDK\AOSharp.Common.dll</HintPath>
+    <HintPath>..\AOSharp.Net\bin\Release\net10.0-windows\Plugins\AOSharp.Common\AOSharp.Common.dll</HintPath>
   </Reference>
   <Reference Include="AOSharp.Core">
-    <HintPath>..\AOSharp.Net3\bin\Release\net10.0-windows\Plugins\AOSharp.Core\AOSharp.Core.dll</HintPath>
+    <HintPath>..\AOSharp.Net\bin\Release\net10.0-windows\Plugins\AOSharp.Core\AOSharp.Core.dll</HintPath>
   </Reference>
 </ItemGroup>
   <ItemGroup>
-    <None Update="items.db">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="MissionLevels.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
+    <EmbeddedResource Include="ItemDb\ItemRelations.csv" LogicalName="ItemRelations.csv" />
   </ItemGroup>
 </Project>

@@ -1,6 +1,7 @@
 using AOSharp.Core.UI;
 using Microsoft.Data.Sqlite;
 using Newtonsoft.Json;
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 
@@ -10,13 +11,14 @@ public class AOItemQueryService
     private HttpListener? _listener;
     private Thread? _serverThread;
     private Server _server;
+    private volatile bool _dbReady;
     public AOItemQueryService(Server server)
     {
         SQLitePCL.Batteries_V2.Init();
         _server = server;
         _dbPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "AOSharp", "MalisMissionRoller", server == Server.PRK ? "items_prk.db" : "items_retail.db"
+            "AOSharp", "AOItemQueryService", server == Server.PRK ? "items_prk.db" : "items_retail.db"
         );
         Directory.CreateDirectory(Path.GetDirectoryName(_dbPath)!);
 
@@ -24,6 +26,8 @@ public class AOItemQueryService
 
     public void Start()
     {
+        EnsureDatabase();
+
         int port = _server == Server.Retail ? 7070 : 7071;
         string url = $"http://localhost:{port}/";
 
@@ -56,6 +60,37 @@ public class AOItemQueryService
         _serverThread.Start();
     }
 
+    /// <summary>
+    /// Builds the item database from this client's game files when it is
+    /// missing or out of date. Queries answer 503 until it is ready.
+    /// </summary>
+    private void EnsureDatabase()
+    {
+        var gameDirectory = Path.GetDirectoryName(Process.GetCurrentProcess().MainModule!.FileName)!;
+
+        if (ItemDbBuilder.IsCurrent(_dbPath, gameDirectory))
+        {
+            _dbReady = true;
+            return;
+        }
+
+        Task.Run(() =>
+        {
+            try
+            {
+                Chat.WriteLine("Item database: building from the game files.");
+                SqliteConnection.ClearAllPools();
+                ItemDbBuilder.Build(gameDirectory, _dbPath, message => Chat.WriteLine(message));
+                _dbReady = true;
+                Chat.WriteLine("Item database: ready.");
+            }
+            catch (Exception ex)
+            {
+                Chat.WriteLine($"Item database: build failed - {ex.Message}");
+            }
+        });
+    }
+
     public void Stop()
     {
         _listener?.Stop();
@@ -86,7 +121,13 @@ public class AOItemQueryService
             int statusCode = 200;
             string? error = null;
 
-            if (path == "/search")
+            // Icons come from the game, not the database.
+            if (!_dbReady && path != "/icons")
+            {
+                statusCode = 503;
+                error = "item database is building";
+            }
+            else if (path == "/search")
             {
                 using var reader = new StreamReader(req.InputStream, req.ContentEncoding);
                 var body = reader.ReadToEnd();
@@ -243,6 +284,9 @@ public class AOItemQueryService
                 WHERE ir.item_id = i.id AND ir.is_group_rep = 0
         )");
 
+        if (r.IdPairs != null && r.IdPairs.Count > 0)
+            return SearchByPairs(r.IdPairs, r.Name);
+
         var parameters = new Dictionary<string, object>();
 
         const string groupMembers = @"(
@@ -258,7 +302,6 @@ public class AOItemQueryService
             sql.Append(" AND i.id = @id");
             parameters["@id"] = r.Id.Value;
         }
-
         else if (!string.IsNullOrEmpty(r.Name))
         {
             sql.Append(@" AND (
@@ -273,6 +316,15 @@ public class AOItemQueryService
             )");
             parameters["@name"] = r.Name;
         }
+
+        if (r.Ids != null && r.Ids.Count > 0)
+        {
+            var placeholders = string.Join(",", r.Ids.Select((_, i) => $"@bulkId{i}"));
+            sql.Append($" AND i.id IN ({placeholders})");
+            for (int i = 0; i < r.Ids.Count; i++)
+                parameters[$"@bulkId{i}"] = r.Ids[i];
+        }
+
 
         if (r.StatFilter != null)
         {
@@ -351,6 +403,51 @@ public class AOItemQueryService
         parameters["@offset"] = r.Offset;
 
         return Query(sql.ToString(), parameters);
+    }
+
+    private List<Dictionary<string, object?>> SearchByPairs(List<IdPair> pairs, string? name)
+    {
+        var cteRows = string.Join(",\n", pairs.Select((_, i) => $"(@low{i}, @high{i})"));
+        var parameters = new Dictionary<string, object>();
+        for (int i = 0; i < pairs.Count; i++)
+        {
+            parameters[$"@low{i}"] = pairs[i].LowId;
+            parameters[$"@high{i}"] = pairs[i].HighId;
+        }
+
+        var sql = $@"
+        WITH pairs(low_id, high_id) AS (VALUES {cteRows})
+        SELECT
+            i.id       AS low_id,
+            i.name,
+            i.description,
+            icon.value AS icon,
+            CASE WHEN p.low_id = p.high_id
+                THEN json_array(
+                    json_object('id', p.low_id, 'name', lm.name, 'ql', COALESCE(lql.value, 1), 'icon', li.value)
+                )
+                ELSE json_array(
+                    json_object('id', p.low_id,  'name', lm.name,  'ql', COALESCE(lql.value, 1), 'icon', li.value),
+                    json_object('id', p.high_id, 'name', hm.name,  'ql', COALESCE(hql.value, 1), 'icon', hi.value)
+                )
+            END AS members
+        FROM pairs p
+        JOIN item i          ON i.id = p.low_id
+        LEFT JOIN item_stat icon ON icon.item_id = i.id       AND icon.stat_id = 79
+        LEFT JOIN item      lm   ON lm.id        = p.low_id
+        LEFT JOIN item_stat lql  ON lql.item_id  = p.low_id  AND lql.stat_id  = 54
+        LEFT JOIN item_stat li   ON li.item_id   = p.low_id  AND li.stat_id   = 79
+        LEFT JOIN item      hm   ON hm.id        = p.high_id
+        LEFT JOIN item_stat hql  ON hql.item_id  = p.high_id AND hql.stat_id  = 54
+        LEFT JOIN item_stat hi   ON hi.item_id   = p.high_id AND hi.stat_id   = 79";
+
+        if (!string.IsNullOrEmpty(name))
+        {
+            sql += " WHERE name_matches(@name, i.name)";
+            parameters["@name"] = name;
+        }
+
+        return Query(sql, parameters);
     }
 
     public static class FuzzyMatcher
@@ -637,11 +734,19 @@ public class AOItemQueryService
         return rows;
     }
 }
+public class IdPair
+{
+    [JsonProperty("lowId")] public int LowId { get; set; }
+    [JsonProperty("highId")] public int HighId { get; set; }
+}
 
 public class SearchRequest
 {
     public string? Name { get; set; }
     public int? Id { get; set; }
+    public List<int>? Ids { get; set; }
+    public List<IdPair>? IdPairs { get; set; }
+
     public int Limit { get; set; } = 50;
     public int Offset { get; set; } = 0;
     public List<ModFilterEntry>? ModFilter { get; set; }
