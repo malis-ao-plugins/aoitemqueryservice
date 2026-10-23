@@ -381,6 +381,21 @@ public class AOItemQueryService
                 parameters[$"@bulkId{i}"] = r.Ids[i];
         }
 
+        // Chains that hold any of these ids, wherever in the chain: the id may
+        // be the representative itself or any of its members. Sent as one JSON
+        // parameter, as the list runs to thousands.
+        if (r.MemberIds != null && r.MemberIds.Count > 0)
+        {
+            sql.Append(@" AND i.id IN (
+                SELECT j.value FROM json_each(@memberIds) j
+                UNION
+                SELECT rep.item_id FROM json_each(@memberIds) j
+                JOIN item_relation m   ON m.item_id = j.value
+                JOIN item_relation rep ON rep.group_id = m.group_id AND rep.is_group_rep = 1
+            )");
+            parameters["@memberIds"] = JsonConvert.SerializeObject(r.MemberIds);
+        }
+
 
         if (r.StatFilter != null)
         {
@@ -801,6 +816,7 @@ public class SearchRequest
     public string? Name { get; set; }
     public int? Id { get; set; }
     public List<int>? Ids { get; set; }
+    public List<int>? MemberIds { get; set; }
     public List<IdPair>? IdPairs { get; set; }
 
     public int Limit { get; set; } = 50;
