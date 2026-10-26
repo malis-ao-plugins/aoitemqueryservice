@@ -11,6 +11,7 @@ public class AOItemQueryService
     private readonly string _dbPath;
     private HttpListener? _listener;
     private Thread? _serverThread;
+    private volatile bool _stopped;
     private Server _server;
     private volatile bool _dbReady;
     public AOItemQueryService(Server server)
@@ -35,27 +36,50 @@ public class AOItemQueryService
         int port = _server == Server.Retail ? 7070 : 7071;
         string url = $"http://localhost:{port}/";
 
+        // Every client builds the same database from the same game files, so
+        // whichever client holds the port answers for all of them. The others
+        // keep trying, so the service outlives the client that had it.
         _serverThread = new Thread(() =>
         {
-            try
+            while (!_stopped)
             {
-                _listener = new HttpListener();
-                _listener.Prefixes.Add(url);
-                _listener.Start();
-                while (_listener.IsListening)
+                var listener = new HttpListener();
+                listener.Prefixes.Add(url);
+                try
+                {
+                    listener.Start();
+                }
+                catch (HttpListenerException)
+                {
+                    listener.Close();
+                    Thread.Sleep(3000);
+                    continue;
+                }
+                catch (Exception ex)
+                {
+                    _game?.Say($"[AoDbServer] Failed to start: {ex.Message}");
+                    return;
+                }
+
+                _listener = listener;
+                if (_stopped)
+                {
+                    listener.Close();
+                    return;
+                }
+
+                while (listener.IsListening)
                 {
                     try
                     {
-                        var context = _listener.GetContext();
+                        var context = listener.GetContext();
                         ThreadPool.QueueUserWorkItem(_ => HandleRequest(context));
                     }
-                    catch (HttpListenerException) { break; }
+                    catch (HttpListenerException) { return; }
+                    catch (ObjectDisposedException) { return; }
                     catch (Exception ex) { _game?.Say($"[AoDbServer] Accept error: {ex.Message}"); }
                 }
-            }
-            catch (Exception ex)
-            {
-                _game?.Say($"[AoDbServer] Failed to start: {ex.Message}");
+                return;
             }
         });
 
@@ -148,6 +172,7 @@ public class AOItemQueryService
 
     public void Stop()
     {
+        _stopped = true;
         _listener?.Stop();
         _listener?.Close();
         _game?.Dispose();
